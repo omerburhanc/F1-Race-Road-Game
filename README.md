@@ -37,6 +37,8 @@ python F1Race.py
 | Steer | A / D or ← / → |
 | Open DRS (when the meter is full) | Shift |
 | Pause | Space / P |
+| Mute / unmute | M |
+| Volume down / up | - / + (or click the speaker icon at the bottom) |
 | Back / quit | Esc |
 
 The high score is saved in `textfile/high_score.txt`.

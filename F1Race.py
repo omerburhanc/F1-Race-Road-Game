@@ -166,12 +166,20 @@ def audio_file(name):
     return asset("audio", name)
 
 
+# master volume, changed with the speaker button or the M / - / + keys.
+# every sound keeps its own base volume and is scaled by this.
+VOLUME_STEPS = (1.0, 0.66, 0.33, 0.0)
+master_volume = 1.0
+_sounds = []          # (sound, base volume)
+
+
 def load_sound(name, vol=1.0):
     if not AUDIO_OK:
         return _Mute()
     try:
         s = pygame.mixer.Sound(audio_file(name))
-        s.set_volume(vol)
+        s.set_volume(vol * master_volume)
+        _sounds.append((s, vol))
         return s
     except (pygame.error, FileNotFoundError):
         return _Mute()
@@ -251,9 +259,44 @@ def music_stop():
         pygame.mixer.music.stop()
 
 
+_music_level = 1.0    # what the game asked for (engine rpm), before the master volume
+
+
 def music_volume(v):
+    global _music_level
+    _music_level = clamp(v, 0, 1)
     if MUSIC_OK:
-        pygame.mixer.music.set_volume(clamp(v, 0, 1))
+        pygame.mixer.music.set_volume(_music_level * master_volume)
+
+
+def set_master_volume(v):
+    global master_volume
+    master_volume = clamp(v, 0, 1)
+    for snd, base in _sounds:
+        snd.set_volume(base * master_volume)
+    music_volume(_music_level)
+
+
+def step_volume(direction):
+    """direction 0 = cycle (button), +1 louder, -1 quieter."""
+    i = min(range(len(VOLUME_STEPS)), key=lambda k: abs(VOLUME_STEPS[k] - master_volume))
+    if direction == 0:
+        i = (i + 1) % len(VOLUME_STEPS)
+    else:
+        i = clamp(i - direction, 0, len(VOLUME_STEPS) - 1)
+    set_master_volume(VOLUME_STEPS[i])
+
+
+_saved_volume = 1.0
+
+
+def toggle_mute():
+    global _saved_volume
+    if master_volume > 0:
+        _saved_volume = master_volume
+        set_master_volume(0.0)
+    else:
+        set_master_volume(_saved_volume or 1.0)
 
 
 def music_pause(p):
@@ -620,6 +663,35 @@ def dim(surf, alpha=150):
     surf.blit(s, (0, 0))
 
 
+class SpeakerButton:
+    """Small speaker icon, bottom centre. Click to cycle 100 / 66 / 33 / 0 %."""
+
+    def __init__(self, cx, cy):
+        self.rect = pygame.Rect(0, 0, 64, 30)
+        self.rect.center = (cx, cy)
+
+    def draw(self, surf):
+        hover = self.rect.collidepoint(pygame.mouse.get_pos())
+        pygame.draw.rect(surf, (55, 60, 70) if hover else (30, 33, 40), self.rect, border_radius=6)
+        x, y = self.rect.x + 10, self.rect.centery
+        col = WHITE if master_volume > 0 else GREY
+        pygame.draw.rect(surf, col, (x, y - 4, 5, 8))
+        pygame.draw.polygon(surf, col, [(x + 5, y - 4), (x + 12, y - 10), (x + 12, y + 10), (x + 5, y + 4)])
+        if master_volume == 0:
+            pygame.draw.line(surf, RED, (x + 17, y - 6), (x + 29, y + 6), 3)
+            pygame.draw.line(surf, RED, (x + 29, y - 6), (x + 17, y + 6), 3)
+        else:
+            bars = sum(1 for v in VOLUME_STEPS[:-1] if master_volume >= v - 1e-6)
+            for i in range(3):
+                h = 6 + i * 5
+                c = WHITE if i < bars else (70, 75, 85)
+                pygame.draw.rect(surf, c, (x + 18 + i * 9, y + 8 - h, 5, h))
+
+    def clicked(self, ev):
+        return (ev.type == pygame.MOUSEBUTTONUP and ev.button == 1
+                and self.rect.collidepoint(ev.pos))
+
+
 # ---------------------------------------------------------------- game
 
 MENU, LIGHTS, RACE, PAUSED, CRASHING, RESULTS = range(6)
@@ -641,6 +713,7 @@ class Game:
         self.btn_quit = Button("QUIT", W // 2, 480, color=(170, 35, 35))
         self.btn_retry = Button("RACE AGAIN", W // 2 - 130, 590, w=230, color=(30, 150, 70))
         self.btn_menu = Button("MENU", W // 2 + 130, 590, w=230, color=(70, 80, 95))
+        self.btn_sound = SpeakerButton(W // 2, H - 20)
 
         self.reset_run()
 
@@ -878,6 +951,21 @@ class Game:
         if ev.type == pygame.QUIT:
             return False
 
+        # sound controls work on every screen
+        if self.btn_sound.clicked(ev):
+            step_volume(0)
+            return True
+        if ev.type == pygame.KEYDOWN:
+            if ev.key == pygame.K_m:
+                toggle_mute()
+                return True
+            if ev.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                step_volume(-1)
+                return True
+            if ev.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                step_volume(+1)
+                return True
+
         if self.state == MENU:
             ready = self.menu_t > 1.6
             if ev.type == pygame.KEYDOWN:
@@ -971,10 +1059,12 @@ class Game:
             dim(screen, 140)
             text(screen, "PAUSED", F_BIG, WHITE, center=(W // 2, H // 2 - 20))
             text(screen, "SPACE resume   ESC menu", F_SMALL, GREY, center=(W // 2, H // 2 + 30))
+            text(screen, "M mute   - / + volume", F_TINY, GREY, center=(W // 2, H // 2 + 58))
         elif self.state == RESULTS:
             self.draw_results()
 
         self.pops.draw(screen)
+        self.btn_sound.draw(screen)
         pygame.display.flip()
 
     def draw_speed_lines(self, surf):
@@ -997,9 +1087,10 @@ class Game:
             if not IS_WEB:            # a browser tab can't be "quit"
                 self.btn_quit.draw(screen)
             lines = ["W: throttle     S: brake     A/D: steer",
-                     "SHIFT: DRS when the meter is full     SPACE: pause"]
+                     "SHIFT: DRS when the meter is full     SPACE: pause",
+                     "M: mute     - / +: volume"]
             for i, l in enumerate(lines):
-                text(screen, l, F_TINY, GREY, center=(W // 2, 560 + i * 22))
+                text(screen, l, F_TINY, GREY, center=(W // 2, 540 + i * 22))
 
     def draw_lights(self):
         # five columns, one light every 0.7 s, all off after a random hold
